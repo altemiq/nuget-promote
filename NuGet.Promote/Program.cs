@@ -39,7 +39,7 @@ static RootCommand CreateRootCommand()
         var nameArgument = new Argument<string>("NAME") { Description = "The package to promote" };
         var versionOption = new Option<NuGet.Versioning.NuGetVersion?>("-v", "--version")
         {
-            CustomParser = (result) => result.Tokens.Count == 1 && NuGet.Versioning.NuGetVersion.TryParse(result.Tokens[0].Value, out var version) ? version : default,
+            CustomParser = result => result.Tokens is [var token] && NuGet.Versioning.NuGetVersion.TryParse(token.Value, out var version) ? version : default,
         };
 
         var command = new Command("source", "Releases the specified name and version")
@@ -58,13 +58,9 @@ static RootCommand CreateRootCommand()
             var recurse = parseResult.GetValue(recurseOption);
             var configFile = parseResult.GetValue(configFileOption);
 
-            if (version?.IsPrerelease == false)
-            {
-                return;
-            }
-
-            var (nupkg, canRemove) = await NuGetInstaller.InstallAsync(name, version, source is null ? default : new[] { source }, log: ConsoleLogger.Instance, root: Environment.CurrentDirectory, cancellationToken: cancellationToken).ConfigureAwait(true);
-            if (nupkg?.Exists is true)
+            if (version is null or { IsPrerelease: true }
+                && await NuGetInstaller.InstallAsync(name, version, source is null ? default : new[] { source }, log: ConsoleLogger.Instance, root: Environment.CurrentDirectory, cancellationToken: cancellationToken).ConfigureAwait(true)
+                is { NuPkg: { Exists: true } nupkg, CanRemove: var canRemove })
             {
                 await PromoteNuPkg(nupkg, label, source, apiKey, recurse, new Dictionary<string, NuGet.Versioning.NuGetVersion>(StringComparer.OrdinalIgnoreCase), canRemove, configFile, Environment.CurrentDirectory,  ConsoleLogger.Instance, cancellationToken).ConfigureAwait(true);
             }
@@ -251,9 +247,9 @@ static RootCommand CreateRootCommand()
             return;
         }
 
-        var sources = source is null
+        IList<string>? sources = source is null
             ? default
-            : new[] { source };
+            : [source];
 
         var destinationVersion = new NuGet.Versioning.NuGetVersion(
             identity.Version.Major,
@@ -398,7 +394,7 @@ static RootCommand CreateRootCommand()
             CurrentDirectory = manifestDirectory,
             OutputDirectory = outputDirectory,
             Logger = log,
-            Exclude = Array.Empty<string>(),
+            Exclude = [],
             Symbols = true,
             Deterministic = true,
         };
@@ -419,8 +415,7 @@ static RootCommand CreateRootCommand()
             var packageName = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{identity.Id}.{destinationVersion}");
             var nupkgPath = Path.Combine(outputDirectory ?? string.Empty, packageName + NuGet.Configuration.NuGetConstants.PackageExtension);
             var symbolsNupkgPath = Path.Combine(outputDirectory ?? string.Empty, packageName + NuGet.Configuration.NuGetConstants.SymbolsExtension);
-            var upload = GetNupkgPath(nupkgPath, symbolsNupkgPath);
-            if (upload is null)
+            if (GetNupkgPath(nupkgPath, symbolsNupkgPath) is not { } upload)
             {
                 return;
             }

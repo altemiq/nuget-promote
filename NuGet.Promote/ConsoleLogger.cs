@@ -70,7 +70,7 @@ internal sealed class ConsoleLogger : LoggerBase
 
     private static void WriteError(string? format, params object?[] args) => WriteColor(Console.Error, ConsoleColor.Red, format, args);
 
-    private static void WriteWarning(string? value) => WriteWarning(prependWarningText: true, value: value, args: Array.Empty<object>());
+    private static void WriteWarning(string? value) => WriteWarning(prependWarningText: true, value: value, args: []);
 
     private static void WriteWarning(bool prependWarningText, string? value, params object?[] args)
     {

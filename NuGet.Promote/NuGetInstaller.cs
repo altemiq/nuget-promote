@@ -23,7 +23,7 @@ internal static class NuGetInstaller
     public static string? GetSourceKey(string source, string? root = default)
     {
         var settings = global::NuGet.Configuration.Settings.LoadDefaultSettings(root);
-        var repository = GetRepositories(settings, new[] { source }).FirstOrDefault();
+        var repository = GetRepositories(settings, [source]).FirstOrDefault();
         return repository?.PackageSource.Credentials?.Password;
     }
 
@@ -64,7 +64,7 @@ internal static class NuGetInstaller
         sourceFolder.Create();
 
         var files = await reader.GetFilesAsync(cancellationToken).ConfigureAwait(false);
-        var packageFiles = files.Where(file => global::NuGet.Packaging.PackageHelper.IsPackageFile(file, global::NuGet.Packaging.PackageSaveMode.Defaultv3));
+        IList<string> packageFiles = [.. files.Where(file => global::NuGet.Packaging.PackageHelper.IsPackageFile(file, global::NuGet.Packaging.PackageSaveMode.Defaultv3))];
         var packageFileExtractor = new global::NuGet.Packaging.PackageFileExtractor(packageFiles, global::NuGet.Packaging.XmlDocFileSaveMode.None);
 
         _ = await reader.CopyFilesAsync(sourceFolder.FullName, packageFiles, packageFileExtractor.ExtractPackageFile, log, cancellationToken).ConfigureAwait(false);
@@ -93,7 +93,8 @@ internal static class NuGetInstaller
         var packageIdentity = new global::NuGet.Packaging.Core.PackageIdentity(name, version);
 
         return packageIdentity.HasVersion
-            ? GetPackages(name, sources ?? Enumerable.Empty<string>(), log ?? NullLogger.Instance, root, cancellationToken).AnyAsync(info => info.Listed && global::NuGet.Versioning.VersionComparer.Default.Equals(info.Version, packageIdentity.Version), cancellationToken)
+            ? GetPackages(name, sources ?? [], log ?? NullLogger.Instance, root, cancellationToken)
+                .AnyAsync(info => info.Listed && global::NuGet.Versioning.VersionComparer.Default.Equals(info.Version, packageIdentity.Version), cancellationToken)
             : new(result: false);
     }
 
@@ -112,8 +113,8 @@ internal static class NuGetInstaller
         ILogger? log = default,
         string? root = default,
         CancellationToken cancellationToken = default) =>
-        GetPackages(name, sources ?? Enumerable.Empty<string>(), log ?? NullLogger.Instance, root, cancellationToken)
-            .Where(package => package.Listed && package.HasVersion)
+        GetPackages(name, sources ?? [], log ?? NullLogger.Instance, root, cancellationToken)
+            .Where(package => package is { Listed: true, HasVersion: true })
             .Select(package => package.Version);
 
     /// <summary>
@@ -140,7 +141,7 @@ internal static class NuGetInstaller
     {
         // get the package identity
         log ??= NullLogger.Instance;
-        var enumerableSources = sources ?? Enumerable.Empty<string>();
+        var enumerableSources = sources ?? [];
         var settings = global::NuGet.Configuration.Settings.LoadDefaultSettings(root);
         var packageIdentity = version is null
             ? await GetLatestPackage(enumerableSources, name, includePrerelease: true, log, settings, cancellationToken).ConfigureAwait(false)
@@ -176,7 +177,12 @@ internal static class NuGetInstaller
 
             return latest;
 
-            static async Task<global::NuGet.Protocol.Core.Types.SourcePackageDependencyInfo?> GetLatestPackage(global::NuGet.Protocol.Core.Types.SourceRepository source, string packageId, bool includePrerelease, ILogger log, CancellationToken cancellationToken)
+            static async Task<global::NuGet.Protocol.Core.Types.SourcePackageDependencyInfo?> GetLatestPackage(
+                global::NuGet.Protocol.Core.Types.SourceRepository source,
+                string packageId,
+                bool includePrerelease,
+                ILogger log,
+                CancellationToken cancellationToken)
             {
                 return await GetPackages(source, packageId, log, cancellationToken)
                     .Where(package => package.Listed && (!package.HasVersion || !package.Version.IsPrerelease || includePrerelease))
@@ -196,21 +202,23 @@ internal static class NuGetInstaller
         {
             foreach (var repository in GetRepositories(settings, sources))
             {
-                var package = await GetPackage(repository, packageId, version, log, cancellationToken).ConfigureAwait(false);
-                if (package is null)
+                if (await GetPackage(repository, packageId, version, log, cancellationToken).ConfigureAwait(false) is { } package)
                 {
-                    continue;
+                    return package;
                 }
-
-                return package;
             }
 
             return default;
 
-            static async Task<global::NuGet.Protocol.Core.Types.SourcePackageDependencyInfo?> GetPackage(global::NuGet.Protocol.Core.Types.SourceRepository source, string packageId, global::NuGet.Versioning.SemanticVersion version, ILogger log, CancellationToken cancellationToken)
+            static async Task<global::NuGet.Protocol.Core.Types.SourcePackageDependencyInfo?> GetPackage(
+                global::NuGet.Protocol.Core.Types.SourceRepository source,
+                string packageId,
+                global::NuGet.Versioning.SemanticVersion version,
+                ILogger log,
+                CancellationToken cancellationToken)
             {
                 return await GetPackages(source, packageId, log, cancellationToken)
-                    .FirstOrDefaultAsync(package => package.Listed && package.HasVersion && global::NuGet.Versioning.VersionComparer.Default.Compare(package.Version, version) == 0, cancellationToken)
+                    .FirstOrDefaultAsync(package => package is { Listed: true, HasVersion: true } && global::NuGet.Versioning.VersionComparer.Default.Compare(package.Version, version) == 0, cancellationToken)
                     .ConfigureAwait(false);
             }
         }
@@ -225,18 +233,23 @@ internal static class NuGetInstaller
         string? root = default,
         CancellationToken cancellationToken = default)
     {
-        return package is null
-            ? throw new ArgumentNullException(nameof(package))
-            : InstallPackage(
-                package,
-                sources ?? Enumerable.Empty<string>(),
-                global::NuGet.Configuration.Settings.LoadDefaultSettings(root),
-                !noCache,
-                !directDownload,
-                log ?? NullLogger.Instance,
-                cancellationToken);
+        return InstallPackageAsync(
+            package ?? throw new ArgumentNullException(nameof(package)),
+            sources ?? [],
+            global::NuGet.Configuration.Settings.LoadDefaultSettings(root),
+            !noCache,
+            !directDownload,
+            log ?? NullLogger.Instance,
+            cancellationToken);
 
-        static async Task<(FileInfo? NuPkg, bool CanRemove)> InstallPackage(global::NuGet.Packaging.Core.PackageIdentity package, IEnumerable<string> sources, global::NuGet.Configuration.ISettings settings, bool useCache, bool addToCache, ILogger log, CancellationToken cancellationToken)
+        static async Task<(FileInfo? NuPkg, bool CanRemove)> InstallPackageAsync(
+            global::NuGet.Packaging.Core.PackageIdentity package,
+            IEnumerable<string> sources,
+            global::NuGet.Configuration.ISettings settings,
+            bool useCache,
+            bool addToCache,
+            ILogger log,
+            CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -259,24 +272,27 @@ internal static class NuGetInstaller
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (useCache)
-        {
-            var globalPackage = GlobalPackagesFolderUtility.GetPackage(
+        if (useCache
+            && GlobalPackagesFolderUtility.GetPackage(
                 package,
-                global::NuGet.Configuration.SettingsUtility.GetGlobalPackagesFolder(settings));
-            if (globalPackage?.PackageStream is FileStream fileStream)
-            {
-                logger.LogInformation($"Found {package} in global package folder");
-                return (new(fileStream.Name), false);
-            }
+                global::NuGet.Configuration.SettingsUtility.GetGlobalPackagesFolder(settings)) is { PackageStream: FileStream fileStream })
+        {
+            logger.LogInformation($"Found {package} in global package folder");
+            return (new(fileStream.Name), false);
         }
 
         using var sourceCacheContext = new global::NuGet.Protocol.Core.Types.SourceCacheContext();
 
-        var (nuPkg, canRemove) = await DownloadPackage(package, repository, sourceCacheContext, settings, addToCache, logger, cancellationToken).ConfigureAwait(false);
-        return nuPkg is null
-            ? throw new PackageNotFoundProtocolException(package)
-            : (nuPkg, canRemove);
+        return await DownloadPackage(
+            package,
+            repository,
+            sourceCacheContext,
+            settings,
+            addToCache,
+            logger,
+            cancellationToken).ConfigureAwait(false) is { NuPkg: { } nuPkg, CanRemove: var canRemove }
+            ? (nuPkg, canRemove)
+            : throw new PackageNotFoundProtocolException(package);
     }
 
     private static async Task<(FileInfo? NuPkg, bool CanRemove)> DownloadPackage(
@@ -290,25 +306,28 @@ internal static class NuGetInstaller
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (useCache)
+        if (useCache
+            && GlobalPackagesFolderUtility.GetPackage(
+                package,
+                global::NuGet.Configuration.SettingsUtility.GetGlobalPackagesFolder(settings)) is { PackageStream: FileStream fileStream })
         {
-            var globalPackage = GlobalPackagesFolderUtility.GetPackage(package, global::NuGet.Configuration.SettingsUtility.GetGlobalPackagesFolder(settings));
-            if (globalPackage?.PackageStream is FileStream fileStream)
-            {
-                logger.LogInformation($"Found {package} in global package folder");
-                return (new(fileStream.Name), false);
-            }
+            logger.LogInformation($"Found {package} in global package folder");
+            return (new(fileStream.Name), false);
         }
 
-        using (var sourceCacheContext = new global::NuGet.Protocol.Core.Types.SourceCacheContext())
+        using var sourceCacheContext = new global::NuGet.Protocol.Core.Types.SourceCacheContext();
+        foreach (var repository in GetRepositories(settings, sources))
         {
-            foreach (var repository in GetRepositories(settings, sources))
+            if (await DownloadPackage(
+                    package,
+                    repository,
+                    sourceCacheContext,
+                    settings,
+                    addToCache,
+                    logger,
+                    cancellationToken).ConfigureAwait(false) is { NuPkg: not null } result)
             {
-                var result = await DownloadPackage(package, repository, sourceCacheContext, settings, addToCache, logger, cancellationToken).ConfigureAwait(false);
-                if (result.NuPkg is not null)
-                {
-                    return result;
-                }
+                return result;
             }
         }
 
@@ -324,10 +343,12 @@ internal static class NuGetInstaller
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        var findPackagesByIdResource = await repository.GetResourceAsync<global::NuGet.Protocol.Core.Types.FindPackageByIdResource>(cancellationToken).ConfigureAwait(false);
-        using var packageDownloder = await findPackagesByIdResource.GetPackageDownloaderAsync(package, cacheContext, logger, cancellationToken).ConfigureAwait(false);
-
-        if (packageDownloder is null)
+        var findPackagesByIdResource = await repository
+            .GetResourceAsync<global::NuGet.Protocol.Core.Types.FindPackageByIdResource>(cancellationToken)
+            .ConfigureAwait(false);
+        if (await findPackagesByIdResource
+                .GetPackageDownloaderAsync(package, cacheContext, logger, cancellationToken)
+                .ConfigureAwait(false) is not { } packageDownloader)
         {
             logger.LogWarning($"Package {package} not found in repository {repository}");
             return default;
@@ -336,22 +357,30 @@ internal static class NuGetInstaller
         logger.LogInformation($"Getting {package} from {repository}");
 
         var tempFile = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
-        var downloaded = await packageDownloder.CopyNupkgFileToAsync(tempFile, cancellationToken).ConfigureAwait(false);
-
-        if (!downloaded)
+        if (!await packageDownloader.CopyNupkgFileToAsync(tempFile, cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidOperationException($"Failed to fetch package {package} from source {repository}");
         }
 
-        if (addToCache)
+        if (!addToCache)
         {
-            var stream = File.OpenRead(tempFile);
-            await using (stream.ConfigureAwait(false))
-            {
-                var downloadCacheContext = new global::NuGet.Protocol.Core.Types.PackageDownloadContext(cacheContext);
-                var clientPolicy = global::NuGet.Packaging.Signing.ClientPolicyContext.GetClientPolicy(settings, logger);
-                using var downloadResourceResult = await GlobalPackagesFolderUtility.AddPackageAsync(repository.PackageSource.Source, package, stream, global::NuGet.Configuration.SettingsUtility.GetGlobalPackagesFolder(settings), downloadCacheContext.ParentId, clientPolicy, logger, cancellationToken).ConfigureAwait(false);
-            }
+            return (new(tempFile), true);
+        }
+
+        var stream = File.OpenRead(tempFile);
+        await using (stream.ConfigureAwait(false))
+        {
+            var downloadCacheContext = new global::NuGet.Protocol.Core.Types.PackageDownloadContext(cacheContext);
+            using var downloadResourceResult = await GlobalPackagesFolderUtility
+                .AddPackageAsync(
+                    repository.PackageSource.Source,
+                    package,
+                    stream,
+                    global::NuGet.Configuration.SettingsUtility.GetGlobalPackagesFolder(settings),
+                    downloadCacheContext.ParentId,
+                    global::NuGet.Packaging.Signing.ClientPolicyContext.GetClientPolicy(settings, logger),
+                    logger,
+                    cancellationToken).ConfigureAwait(false);
         }
 
         return (new(tempFile), true);
@@ -369,9 +398,8 @@ internal static class NuGetInstaller
 
         static global::NuGet.Configuration.PackageSource ResolveSource(IEnumerable<global::NuGet.Configuration.PackageSource> availableSources, string source)
         {
-            var resolvedSource = availableSources.FirstOrDefault(
-                f => f.Source.Equals(source, StringComparison.OrdinalIgnoreCase)
-                     || f.Name.Equals(source, StringComparison.OrdinalIgnoreCase));
+            var resolvedSource = availableSources.FirstOrDefault(f => f.Source.Equals(source, StringComparison.OrdinalIgnoreCase)
+                                                                      || f.Name.Equals(source, StringComparison.OrdinalIgnoreCase));
 
             return resolvedSource ?? new global::NuGet.Configuration.PackageSource(source);
         }
@@ -403,7 +431,8 @@ internal static class NuGetInstaller
         global::NuGet.Protocol.Core.Types.SourceRepository source,
         string packageId,
         ILogger log,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        [System.Runtime.CompilerServices.EnumeratorCancellation]
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
