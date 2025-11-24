@@ -13,16 +13,18 @@ static RootCommand CreateRootCommand()
 {
     var labelOption = new Option<string>("-l", "--label") { Description = "The new label, or leave blank to promote to a full release.", Recursive = true };
     var sourceOption = new Option<string>("-s", "--source") { Description = "Package source (URL, UNC/folder path or package source name) to use. Defaults to DefaultPushSource if specified in NuGet.Config.", Recursive = true };
+    var destinationOption = new Option<string>("-d", "--destination") { Description = "Package destination (URL, UNC/folder path or package source name) to use. Defaults to source.", Recursive = true };
     var apiKeyOption = new Option<string>("-k", "--api-key") { Description = "The API key for the server.", Recursive = true };
     var recurseOption = new Option<bool>("-r", "--recurse") { Description = "Whether to recursively promote dependencies", Recursive = true };
     var configFileOption = new Option<FileInfo>("--config-file") { Description = "The nuget config file to use" };
     var command = new RootCommand
     {
-        CreateSourceCommand(labelOption, sourceOption, apiKeyOption, recurseOption, configFileOption),
+        CreateSourceCommand(labelOption, sourceOption, destinationOption, apiKeyOption, recurseOption, configFileOption),
         CreateNupkgCommand(labelOption, sourceOption, apiKeyOption, recurseOption, configFileOption),
         CreateZipCommand(labelOption, sourceOption, apiKeyOption, recurseOption, configFileOption),
         labelOption,
         sourceOption,
+        destinationOption,
         apiKeyOption,
         recurseOption,
     };
@@ -32,11 +34,12 @@ static RootCommand CreateRootCommand()
     static Command CreateSourceCommand(
         Option<string> labelOption,
         Option<string> sourceOption,
+        Option<string> destinationOption,
         Option<string> apiKeyOption,
         Option<bool> recurseOption,
         Option<FileInfo> configFileOption)
     {
-        var nameArgument = new Argument<string>("NAME") { Description = "The package to promote" };
+        var nameArgument = new Argument<string[]>("NAME") { Description = "The package to promote" };
         var versionOption = new Option<NuGet.Versioning.NuGetVersion?>("-v", "--version")
         {
             CustomParser = result => result.Tokens is [var token] && NuGet.Versioning.NuGetVersion.TryParse(token.Value, out var version) ? version : default,
@@ -50,19 +53,41 @@ static RootCommand CreateRootCommand()
 
         command.SetAction(async (parseResult, cancellationToken) =>
         {
-            var name = parseResult.GetValue(nameArgument)!;
             var version = parseResult.GetValue(versionOption);
+            if (version is { IsPrerelease: false })
+            {
+                return;
+            }
+
+            var names = parseResult.GetValue(nameArgument)!;
             var label = parseResult.GetValue(labelOption);
             var source = parseResult.GetValue(sourceOption);
+            var destination = parseResult.GetValue(destinationOption) ?? source;
             var apiKey = parseResult.GetValue(apiKeyOption);
             var recurse = parseResult.GetValue(recurseOption);
             var configFile = parseResult.GetValue(configFileOption);
 
-            if (version is null or { IsPrerelease: true }
-                && await NuGetInstaller.InstallAsync(name, version, source is null ? default : new[] { source }, log: ConsoleLogger.Instance, root: Environment.CurrentDirectory, cancellationToken: cancellationToken).ConfigureAwait(true)
-                is { NuPkg: { Exists: true } nupkg, CanRemove: var canRemove })
+            var packageCache = new Dictionary<string, NuGet.Versioning.NuGetVersion>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var name in names)
             {
-                await PromoteNuPkg(nupkg, label, source, apiKey, recurse, new Dictionary<string, NuGet.Versioning.NuGetVersion>(StringComparer.OrdinalIgnoreCase), canRemove, configFile, Environment.CurrentDirectory,  ConsoleLogger.Instance, cancellationToken).ConfigureAwait(true);
+                if (await NuGetInstaller.InstallAsync(name, version, source is null ? default : new[] { source }, log: ConsoleLogger.Instance, root: Environment.CurrentDirectory, cancellationToken: cancellationToken)
+                        .ConfigureAwait(true)
+                    is { NuPkg: { Exists: true } nupkg, CanRemove: var canRemove })
+                {
+                    await PromoteNuPkg(
+                        nupkg,
+                        label,
+                        destination,
+                        apiKey,
+                        recurse,
+                        packageCache,
+                        canRemove,
+                        configFile,
+                        Environment.CurrentDirectory,
+                        ConsoleLogger.Instance,
+                        cancellationToken).ConfigureAwait(true);
+                }
             }
         });
 
